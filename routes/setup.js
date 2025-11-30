@@ -1727,18 +1727,27 @@ async function buildUpdateData(analysis, doc) {
 async function saveDocumentChanges(docId, updateData, analysis, originalData) {
   const { tags: originalTags, correspondent: originalCorrespondent, title: originalTitle } = originalData;
   
-  await Promise.all([
+  const tasks = [
     documentModel.saveOriginalData(docId, originalTags, originalCorrespondent, originalTitle),
     paperlessService.updateDocument(docId, updateData),
     documentModel.addProcessedDocument(docId, updateData.title),
-    documentModel.addOpenAIMetrics(
-      docId, 
-      analysis.metrics.promptTokens,
-      analysis.metrics.completionTokens,
-      analysis.metrics.totalTokens
-    ),
     documentModel.addToHistory(docId, updateData.tags, updateData.title, analysis.document.correspondent)
-  ]);
+  ];
+
+  if (analysis.metrics) {
+    tasks.push(
+      documentModel.addOpenAIMetrics(
+        docId,
+        analysis.metrics.promptTokens,
+        analysis.metrics.completionTokens,
+        analysis.metrics.totalTokens
+      )
+    );
+  } else {
+    console.warn(`[WARNING] Skipping OpenAI metrics save for document ${docId} - metrics unavailable`);
+  }
+
+  await Promise.all(tasks);
 }
 
 /**
@@ -3038,23 +3047,33 @@ router.post('/manual/analyze', express.json(), async (req, res) => {
       return res.status(400).json({ error: 'Valid content string is required' });
     }
 
+    const saveMetrics = async (documentId, metrics) => {
+      if (!metrics) {
+        console.warn('[WARNING] Skipping metrics persistence - metrics unavailable');
+        return;
+      }
+      await documentModel.addOpenAIMetrics(
+        documentId,
+        metrics.promptTokens,
+        metrics.completionTokens,
+        metrics.totalTokens
+      );
+    };
+
     if (process.env.AI_PROVIDER === 'openai') {
       const analyzeDocument = await openaiService.analyzeDocument(content, existingTagsList, existingCorrespondentList, existingDocumentTypesList, id || []);
-      await documentModel.addOpenAIMetrics(
-            id, 
-            analyzeDocument.metrics.promptTokens,
-            analyzeDocument.metrics.completionTokens,
-            analyzeDocument.metrics.totalTokens
-          )
+      await saveMetrics(id, analyzeDocument.metrics);
       return res.json(analyzeDocument);
     } else if (process.env.AI_PROVIDER === 'ollama') {
       const analyzeDocument = await ollamaService.analyzeDocument(content, existingTagsList, existingCorrespondentList, existingDocumentTypesList, id || []);
       return res.json(analyzeDocument);
     } else if (process.env.AI_PROVIDER === 'custom') {
       const analyzeDocument = await customService.analyzeDocument(content, existingTagsList, existingCorrespondentList, existingDocumentTypesList, id || []);
+      await saveMetrics(id, analyzeDocument.metrics);
       return res.json(analyzeDocument);
     } else if (process.env.AI_PROVIDER === 'azure') {
       const analyzeDocument = await azureService.analyzeDocument(content, existingTagsList, existingCorrespondentList, existingDocumentTypesList, id || []);
+      await saveMetrics(id, analyzeDocument.metrics);
       return res.json(analyzeDocument);
     } else {
       return res.status(500).json({ error: 'AI provider not configured' });
@@ -3150,35 +3169,33 @@ router.post('/manual/playground', express.json(), async (req, res) => {
       return res.status(400).json({ error: 'Valid content string is required' });
     }
 
+    const saveMetrics = async (documentId, metrics) => {
+      if (!metrics) {
+        console.warn('[WARNING] Skipping metrics persistence - metrics unavailable');
+        return;
+      }
+      await documentModel.addOpenAIMetrics(
+        documentId,
+        metrics.promptTokens,
+        metrics.completionTokens,
+        metrics.totalTokens
+      );
+    };
+
     if (process.env.AI_PROVIDER === 'openai') {
       const analyzeDocument = await openaiService.analyzePlayground(content, prompt);
-      await documentModel.addOpenAIMetrics(
-        documentId, 
-        analyzeDocument.metrics.promptTokens,
-        analyzeDocument.metrics.completionTokens,
-        analyzeDocument.metrics.totalTokens
-      )
+      await saveMetrics(documentId, analyzeDocument.metrics);
       return res.json(analyzeDocument);
     } else if (process.env.AI_PROVIDER === 'ollama') {
       const analyzeDocument = await ollamaService.analyzePlayground(content, prompt);
       return res.json(analyzeDocument);
     } else if (process.env.AI_PROVIDER === 'custom') {
       const analyzeDocument = await customService.analyzePlayground(content, prompt);
-      await documentModel.addOpenAIMetrics(
-        documentId, 
-        analyzeDocument.metrics.promptTokens,
-        analyzeDocument.metrics.completionTokens,
-        analyzeDocument.metrics.totalTokens
-      )
+      await saveMetrics(documentId, analyzeDocument.metrics);
       return res.json(analyzeDocument);
     } else if (process.env.AI_PROVIDER === 'azure') {
       const analyzeDocument = await azureService.analyzePlayground(content, prompt);
-      await documentModel.addOpenAIMetrics(
-        documentId, 
-        analyzeDocument.metrics.promptTokens,
-        analyzeDocument.metrics.completionTokens,
-        analyzeDocument.metrics.totalTokens
-      )
+      await saveMetrics(documentId, analyzeDocument.metrics);
       return res.json(analyzeDocument);
     } else {
       return res.status(500).json({ error: 'AI provider not configured' });

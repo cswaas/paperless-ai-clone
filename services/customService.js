@@ -202,14 +202,18 @@ class CustomOpenAIService {
 
       // Log token usage
       console.log(`[DEBUG] [${timestamp}] Custom OpenAI request sent`);
-      console.log(`[DEBUG] [${timestamp}] Total tokens: ${response.usage.total_tokens}`);
+      if (response.usage?.total_tokens !== undefined) {
+        console.log(`[DEBUG] [${timestamp}] Total tokens: ${response.usage.total_tokens}`);
+      } else {
+        console.warn('[WARNING] Custom provider did not return usage metrics');
+      }
 
       const usage = response.usage;
-      const mappedUsage = {
+      const mappedUsage = usage ? {
         promptTokens: usage.prompt_tokens,
         completionTokens: usage.completion_tokens,
         totalTokens: usage.total_tokens
-      };
+      } : null;
 
       let jsonContent = response.choices[0].message.content;
       jsonContent = jsonContent.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
@@ -329,14 +333,18 @@ class CustomOpenAIService {
 
       // Log token usage
       console.log(`[DEBUG] [${timestamp}] Custom OpenAI request sent`);
-      console.log(`[DEBUG] [${timestamp}] Total tokens: ${response.usage.total_tokens}`);
+      if (response.usage?.total_tokens !== undefined) {
+        console.log(`[DEBUG] [${timestamp}] Total tokens: ${response.usage.total_tokens}`);
+      } else {
+        console.warn('[WARNING] Custom provider did not return usage metrics');
+      }
 
       const usage = response.usage;
-      const mappedUsage = {
+      const mappedUsage = usage ? {
         promptTokens: usage.prompt_tokens,
         completionTokens: usage.completion_tokens,
         totalTokens: usage.total_tokens
-      };
+      } : null;
 
       let jsonContent = response.choices[0].message.content;
       jsonContent = jsonContent.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
