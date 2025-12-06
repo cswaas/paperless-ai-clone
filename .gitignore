@@ -25,6 +25,7 @@ rag_config.conf
 indexed.conf
 indexing_complete.flag
 RAGZ_README.md
+.DS_Store
 
 # Local development files
 .local/
