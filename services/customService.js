@@ -12,6 +12,44 @@ const fs = require('fs').promises;
 const path = require('path');
 const RestrictionPromptService = require('./restrictionPromptService');
 
+// Best-effort JSON cleaner to salvage slightly invalid model responses.
+function cleanAndParseJson(rawContent) {
+  let jsonContent = String(rawContent || '');
+
+  // Strip code fences
+  jsonContent = jsonContent.replace(/```json\s*/gi, '').replace(/```/g, '').trim();
+
+  // Take substring from first '{'
+  const firstBrace = jsonContent.indexOf('{');
+  if (firstBrace !== -1) {
+    jsonContent = jsonContent.slice(firstBrace);
+  }
+
+  // Trim anything after the last '}'
+  const lastBrace = jsonContent.lastIndexOf('}');
+  if (lastBrace !== -1) {
+    jsonContent = jsonContent.slice(0, lastBrace + 1);
+  }
+
+  // Remove trailing commas before closing braces/brackets
+  jsonContent = jsonContent.replace(/,\s*([}\]])/g, '$1');
+
+  // Balance braces/brackets if the model left them open
+  const openCurly = (jsonContent.match(/\{/g) || []).length;
+  const closeCurly = (jsonContent.match(/\}/g) || []).length;
+  if (openCurly > closeCurly) {
+    jsonContent += '}'.repeat(openCurly - closeCurly);
+  }
+
+  const openSquare = (jsonContent.match(/\[/g) || []).length;
+  const closeSquare = (jsonContent.match(/\]/g) || []).length;
+  if (openSquare > closeSquare) {
+    jsonContent += ']'.repeat(openSquare - closeSquare);
+  }
+
+  return JSON.parse(jsonContent);
+}
+
 class CustomOpenAIService {
   constructor() {
     this.client = null;
@@ -191,6 +229,7 @@ class CustomOpenAIService {
             content: truncatedContent
           }
         ],
+        response_format: { type: 'json_object' },
         temperature: 0.3,
       });
 
@@ -216,17 +255,18 @@ class CustomOpenAIService {
       } : null;
 
       let jsonContent = response.choices[0].message.content;
-      jsonContent = jsonContent.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+      console.log('[DEBUG] Raw provider content (first 500 chars):', String(jsonContent).slice(0, 500));
+      const logDir = path.join(__dirname, '..', 'logs');
+      await fs.mkdir(logDir, { recursive: true });
+      await fs.appendFile(path.join(logDir, 'response-raw.txt'), `${String(jsonContent)}\n---\n`);
 
       let parsedResponse;
       try {
-        parsedResponse = JSON.parse(jsonContent);
-        //write to file and append to the file (txt)
-        fs.appendFile('./logs/response.txt', jsonContent, (err) => {
-          if (err) throw err;
-        });
+        parsedResponse = cleanAndParseJson(jsonContent);
+        await fs.appendFile(path.join(logDir, 'response.txt'), `${JSON.stringify(parsedResponse)}\n`);
       } catch (error) {
-        console.error('Failed to parse JSON response:', error);
+        await fs.appendFile(path.join(logDir, 'response-error.txt'), `${String(jsonContent)}\n---\n`);
+        console.error('Failed to parse JSON response:', error, '\nRaw content:', jsonContent);
         throw new Error('Invalid JSON response from API');
       }
 
@@ -323,6 +363,7 @@ class CustomOpenAIService {
             content: truncatedContent
           }
         ],
+        response_format: { type: 'json_object' },
         temperature: 0.3,
       });
 
@@ -347,13 +388,13 @@ class CustomOpenAIService {
       } : null;
 
       let jsonContent = response.choices[0].message.content;
-      jsonContent = jsonContent.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+      console.log('[DEBUG] Raw provider content (first 500 chars):', String(jsonContent).slice(0, 500));
 
       let parsedResponse;
       try {
-        parsedResponse = JSON.parse(jsonContent);
+        parsedResponse = cleanAndParseJson(jsonContent);
       } catch (error) {
-        console.error('Failed to parse JSON response:', error);
+        console.error('Failed to parse JSON response:', error, '\nRaw content:', jsonContent);
         throw new Error('Invalid JSON response from API');
       }
 
