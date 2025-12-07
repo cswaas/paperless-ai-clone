@@ -5,6 +5,9 @@ const { OpenAI } = require('openai');
 const config = require('../config/config');
 const AzureOpenAI = require('openai').AzureOpenAI;
 
+// Masks secret values when logging to avoid leaking credentials.
+const maskSecret = (value) => (value ? '******' : '(unset)');
+
 class SetupService {
   constructor() {
     this.envPath = path.join(process.cwd(), 'data', '.env');
@@ -93,7 +96,11 @@ class SetupService {
       apiKey: apiKey,
       model: model
     };
-    console.log('Custom AI config:', config);
+    console.log('Custom AI config:', {
+      baseURL: config.baseURL,
+      apiKey: maskSecret(config.apiKey),
+      model: config.model,
+    });
     try {
       const openai = new OpenAI({ 
         apiKey: config.apiKey, 
