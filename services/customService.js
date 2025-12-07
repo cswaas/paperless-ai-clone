@@ -14,7 +14,23 @@ const RestrictionPromptService = require('./restrictionPromptService');
 
 // Best-effort JSON cleaner to salvage slightly invalid model responses.
 function cleanAndParseJson(rawContent) {
-  let jsonContent = String(rawContent || '');
+  const originalContent = String(rawContent || '');
+  let jsonContent = originalContent;
+  const repairNotes = [];
+
+  const markReplace = (input, regex, replacement, note) => {
+    const next = input.replace(regex, replacement);
+    if (next !== input && note) {
+      repairNotes.push(note);
+    }
+    return next;
+  };
+
+  // Prefer fenced JSON blocks if present
+  const fencedMatch = jsonContent.match(/```json([\s\S]*?)```/i);
+  if (fencedMatch) {
+    jsonContent = fencedMatch[1];
+  }
 
   // Strip code fences
   jsonContent = jsonContent.replace(/```json\s*/gi, '').replace(/```/g, '').trim();
@@ -25,29 +41,114 @@ function cleanAndParseJson(rawContent) {
     jsonContent = jsonContent.slice(firstBrace);
   }
 
-  // Trim anything after the last '}'
-  const lastBrace = jsonContent.lastIndexOf('}');
-  if (lastBrace !== -1) {
-    jsonContent = jsonContent.slice(0, lastBrace + 1);
+  // Fix missing commas between array object entries: `}{` -> `},{`
+  jsonContent = jsonContent.replace(/}\s*{\s*"/g, '},{"');
+
+  // Close unclosed value strings that break at newline
+  jsonContent = jsonContent.replace(/("value"\s*:\s*")([^"\n]*)(\n|$)/g, '$1$2"$3');
+
+  // Avoid aggressively collapsing braces here; let bracket balancing handle missing closures
+
+  // Close unterminated value strings that run into a closing array/brace without quotes/commas
+  jsonContent = markReplace(
+    jsonContent,
+    /(\"value\"\s*:\s*\"[^"\]\n]*)(\s*\])/g,
+    '$1"}]',
+    'closed-value-before-array'
+  );
+
+  const balanceBrackets = (input) => {
+    let output = input.replace(/,\s*([}\]])/g, '$1');
+
+    // Track bracket order so we append closers in the correct sequence (e.g. ] before })
+    const stack = [];
+    let inString = false;
+    let escapeNext = false;
+
+    for (let i = 0; i < output.length; i++) {
+      const ch = output[i];
+
+      if (escapeNext) {
+        escapeNext = false;
+        continue;
+      }
+
+      if (ch === '\\') {
+        escapeNext = true;
+        continue;
+      }
+
+      if (ch === '"') {
+        inString = !inString;
+        continue;
+      }
+
+      if (inString) continue;
+
+      if (ch === '{' || ch === '[') {
+        stack.push(ch);
+      } else if (ch === '}' || ch === ']') {
+        // pop the matching opener if present
+        if (stack.length && ((ch === '}' && stack[stack.length - 1] === '{') || (ch === ']' && stack[stack.length - 1] === '['))) {
+          stack.pop();
+        }
+      }
+    }
+
+    // Append missing closers in reverse order of openings
+    while (stack.length) {
+      const opener = stack.pop();
+      output += opener === '{' ? '}' : ']';
+    }
+
+    return output;
+  };
+
+  const tryParse = (input) => JSON.parse(input);
+
+  const balancedContent = balanceBrackets(jsonContent);
+  const normalizeTail = (input) => input
+    // Remove stray trailing commas before array/obj closers
+    .replace(/,\s*\]/g, ']')
+    .replace(/,\s*\}/g, '}');
+  const normalizedContent = normalizeTail(balancedContent);
+  try {
+    const parsed = tryParse(normalizedContent);
+    return { parsed, repaired: repairNotes.length > 0, cleaned: normalizedContent, repairNotes };
+  } catch (firstError) {
+    let repairedContent = jsonContent;
+
+    // Close lines with odd quote counts (common when a value string is left open)
+    repairedContent = repairedContent
+      .split('\n')
+      .map(line => {
+        const quoteCount = (line.match(/"/g) || []).length;
+        if (quoteCount % 2 === 1) return `${line}"`;
+
+        // If value line ends without closing quote, add it
+        if (/"value"\s*:\s*"[^"\n]*$/.test(line.trim())) {
+          return `${line}"`;
+        }
+
+        return line;
+      })
+      .join('\n');
+
+    repairedContent = balanceBrackets(repairedContent);
+    const normalizedRepaired = normalizeTail(repairedContent);
+
+    try {
+      return { parsed: tryParse(normalizedRepaired), repaired: true, cleaned: normalizedRepaired, firstError, repairNotes };
+    } catch (secondError) {
+      const error = new Error(`Failed to parse JSON after repair: ${secondError.message}`);
+      error.firstError = firstError;
+      error.secondError = secondError;
+      error.cleaned = normalizedContent;
+      error.repaired = normalizedRepaired;
+      error.original = originalContent;
+      throw error;
+    }
   }
-
-  // Remove trailing commas before closing braces/brackets
-  jsonContent = jsonContent.replace(/,\s*([}\]])/g, '$1');
-
-  // Balance braces/brackets if the model left them open
-  const openCurly = (jsonContent.match(/\{/g) || []).length;
-  const closeCurly = (jsonContent.match(/\}/g) || []).length;
-  if (openCurly > closeCurly) {
-    jsonContent += '}'.repeat(openCurly - closeCurly);
-  }
-
-  const openSquare = (jsonContent.match(/\[/g) || []).length;
-  const closeSquare = (jsonContent.match(/\]/g) || []).length;
-  if (openSquare > closeSquare) {
-    jsonContent += ']'.repeat(openSquare - closeSquare);
-  }
-
-  return JSON.parse(jsonContent);
 }
 
 class CustomOpenAIService {
@@ -258,16 +359,25 @@ class CustomOpenAIService {
       console.log('[DEBUG] Raw provider content (first 500 chars):', String(jsonContent).slice(0, 500));
       const logDir = path.join(__dirname, '..', 'logs');
       await fs.mkdir(logDir, { recursive: true });
-      await fs.appendFile(path.join(logDir, 'response-raw.txt'), `${String(jsonContent)}\n---\n`);
+      await fs.appendFile(path.join(logDir, 'response-raw.txt'), `doc:${id ?? 'n/a'}\n${String(jsonContent)}\n---\n`);
 
       let parsedResponse;
       try {
-        parsedResponse = cleanAndParseJson(jsonContent);
+        const parseResult = cleanAndParseJson(jsonContent);
+        parsedResponse = parseResult.parsed;
         await fs.appendFile(path.join(logDir, 'response.txt'), `${JSON.stringify(parsedResponse)}\n`);
+
+        if (parseResult.repaired) {
+          console.warn(`[WARNING] Response required auto-repair${id ? ` for doc ${id}` : ''}`);
+          const repairNoteStr = (parseResult.repairNotes && parseResult.repairNotes.length)
+            ? `notes:${parseResult.repairNotes.join(',')}`
+            : 'notes:none';
+          await fs.appendFile(path.join(logDir, 'response-repaired.txt'), `doc:${id ?? 'n/a'}\n${repairNoteStr}\n${parseResult.cleaned}\n---\n`);
+        }
       } catch (error) {
-        await fs.appendFile(path.join(logDir, 'response-error.txt'), `${String(jsonContent)}\n---\n`);
-        console.error('Failed to parse JSON response:', error, '\nRaw content:', jsonContent);
-        throw new Error('Invalid JSON response from API');
+        await fs.appendFile(path.join(logDir, 'response-error.txt'), `doc:${id ?? 'n/a'}\n${String(jsonContent)}\n---\n`);
+        console.error(`Failed to parse JSON response for doc ${id}:`, error, '\nRaw content:', jsonContent);
+        throw new Error(`Invalid JSON response from API for doc ${id}`);
       }
 
       // Validate response structure
@@ -392,7 +502,12 @@ class CustomOpenAIService {
 
       let parsedResponse;
       try {
-        parsedResponse = cleanAndParseJson(jsonContent);
+        const parseResult = cleanAndParseJson(jsonContent);
+        parsedResponse = parseResult.parsed;
+
+        if (parseResult.repaired) {
+          console.warn('[WARNING] Playground response required auto-repair');
+        }
       } catch (error) {
         console.error('Failed to parse JSON response:', error, '\nRaw content:', jsonContent);
         throw new Error('Invalid JSON response from API');
